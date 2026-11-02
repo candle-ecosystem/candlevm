@@ -17,5 +17,5 @@ the [CandleVM documentation](https://candle.nozyx.dev/docs/1/candlevm).
 
 ## License
 
-CandleVM is licensed under the **GNU General Public License v3.0 only (GPL-3.0-only)**. See the [`LICENSE`](LICENSE)
+CandleVM is licensed under the **GNU General Public License v3.0 only**. See the [`LICENSE`](LICENSE)
 file for details.
