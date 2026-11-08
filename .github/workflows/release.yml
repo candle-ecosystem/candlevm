@@ -34,6 +34,14 @@ jobs:
             runner: ubuntu-24.04-arm
             binary: candlevm
 
+          - target: linux-x86_64-musl
+            runner: ubuntu-24.04
+            binary: candlevm
+
+          - target: linux-aarch64-musl
+            runner: ubuntu-24.04-arm
+            binary: candlevm
+
           - target: windows-x86_64
             runner: windows-2025
             binary: candlevm.exe
@@ -57,8 +65,27 @@ jobs:
         with:
           python-version: "3.x"
 
+      - name: Install musl toolchain
+        if: endsWith(matrix.target, '-musl')
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+
+          rustup target add "$(uname -m)-unknown-linux-musl"
+
       - name: Build CandleVM
-        run: cargo build --release --locked
+        shell: bash
+        run: |
+          if [[ "${{ matrix.target }}" == *-musl ]]; then
+            ARCH="$(uname -m)"
+            RUST_TARGET="${ARCH}-unknown-linux-musl"
+          
+            RUSTFLAGS="-C linker=musl-gcc" \
+              cargo build --release --locked --target "$RUST_TARGET"
+          else
+            cargo build --release --locked
+          fi
 
       - name: Package ZIP
         shell: bash
@@ -69,11 +96,27 @@ jobs:
         run: |
           python - <<'PY'
           import os
+          import platform
           import zipfile
           from pathlib import Path
 
           root = Path.cwd()
-          binary = root / "target" / "release" / os.environ["BINARY_NAME"]
+          target = os.environ["TARGET_NAME"]
+
+          if target.endswith("-musl"):
+              arch = platform.machine()
+              binary = (
+                  root / "target"
+                  / f"{arch}-unknown-linux-musl"
+                  / "release"
+                  / os.environ["BINARY_NAME"]
+              )
+          else:
+              binary = (
+                  root / "target" / "release"
+                  / os.environ["BINARY_NAME"]
+              )
+
           dist = root / "dist"
           dist.mkdir(exist_ok=True)
 
@@ -82,7 +125,7 @@ jobs:
 
           archive = dist / (
               f"candlevm-{os.environ['VERSION']}-"
-              f"{os.environ['TARGET_NAME']}.zip"
+              f"{target}.zip"
           )
 
           files = [binary, root / "LICENSE", root / "README.md"]
