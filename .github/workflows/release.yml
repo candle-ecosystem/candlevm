@@ -1,10 +1,17 @@
 name: CandleVM Release
 
 on:
-  push:
-    tags:
-      - "v*"
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v1.0.0)"
+        required: true
+        type: string
+      publish_crate:
+        description: "Publish to crates.io"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -53,6 +60,38 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Verify version matches tag
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          TAG_VERSION="${RELEASE_TAG#v}"
+
+          CARGO_VERSION=$(python - <<'PY'
+          import tomllib
+          from pathlib import Path
+
+          with Path("Cargo.toml").open("rb") as f:
+              cargo = tomllib.load(f)
+
+          print(cargo["package"]["version"])
+          PY
+          )
+
+          if [[ "$RELEASE_TAG" != v* || "$TAG_VERSION" != "$CARGO_VERSION" ]]; then
+            echo "::error::Tag $RELEASE_TAG does not match Cargo.toml version $CARGO_VERSION"
+            exit 1
+          fi
+
+          echo "Version verified: $RELEASE_TAG"
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@1.99.1
@@ -60,18 +99,12 @@ jobs:
       - name: Configure Rust cache
         uses: Swatinem/rust-cache@v2
 
-      - name: Install Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.x"
-
       - name: Install musl toolchain
         if: endsWith(matrix.target, '-musl')
         shell: bash
         run: |
           sudo apt-get update
           sudo apt-get install -y musl-tools
-
           rustup target add "$(uname -m)-unknown-linux-musl"
 
       - name: Build CandleVM
@@ -80,19 +113,38 @@ jobs:
           if [[ "${{ matrix.target }}" == *-musl ]]; then
             ARCH="$(uname -m)"
             RUST_TARGET="${ARCH}-unknown-linux-musl"
-          
+
             RUSTFLAGS="-C linker=musl-gcc" \
               cargo build --release --locked --target "$RUST_TARGET"
           else
             cargo build --release --locked
           fi
 
+      - name: Verify static musl linkage
+        if: endsWith(matrix.target, '-musl')
+        shell: bash
+        run: |
+          ARCH="$(uname -m)"
+          BINARY="target/${ARCH}-unknown-linux-musl/release/candlevm"
+
+          if readelf -l "$BINARY" | grep -q 'INTERP'; then
+            echo "::error::CandleVM contains a dynamic interpreter"
+            exit 1
+          fi
+
+          if readelf -d "$BINARY" 2>/dev/null | grep -q '(NEEDED)'; then
+            echo "::error::CandleVM has dynamic library dependencies"
+            exit 1
+          fi
+
+          echo "CandleVM is statically linked."
+
       - name: Package ZIP
         shell: bash
         env:
           BINARY_NAME: ${{ matrix.binary }}
           TARGET_NAME: ${{ matrix.target }}
-          VERSION: ${{ github.ref_name }}
+          VERSION: ${{ inputs.tag }}
         run: |
           python - <<'PY'
           import os
@@ -151,7 +203,6 @@ jobs:
   release:
     name: Publish GitHub Release
     needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-24.04
 
     steps:
@@ -169,6 +220,7 @@ jobs:
       - name: Publish release assets
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ inputs.tag }}
           files: |
             release-assets/*.zip
             release-assets/SHA256SUMS.txt
@@ -178,27 +230,17 @@ jobs:
   publish-crate:
     name: Publish to crates.io
     needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: inputs.publish_crate
     runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@1.99.1
-
-      - name: Verify version matches tag
-        shell: bash
-        run: |
-          TAG_VERSION="${GITHUB_REF_NAME#v}"
-          CARGO_VERSION=$(cargo metadata --no-deps --format-version 1 \
-            | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "candlevm"))')
-
-          if [ "$TAG_VERSION" != "$CARGO_VERSION" ]; then
-            echo "::error::Tag version $TAG_VERSION does not match Cargo.toml version $CARGO_VERSION"
-            exit 1
-          fi
 
       - name: Publish to crates.io
         run: cargo publish --locked --token "$CARGO_REGISTRY_TOKEN"
